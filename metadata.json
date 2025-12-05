@@ -1,0 +1,5 @@
+{
+  "name": "Bubble Sort Master",
+  "description": "An interactive educational app to learn, visualize, and assess your knowledge of the Bubble Sort algorithm, based on university-level course material.",
+  "requestFramePermissions": []
+}
