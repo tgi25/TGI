@@ -1,0 +1,113 @@
+import tensorflow as tf
+from tensorflow.keras import layers, models, Input
+
+def inception_module(x, filters):
+    """
+    Creates an Inception module with 4 parallel branches.
+    
+    Args:
+        x: Input tensor.
+        filters: A list/tuple of 6 integers:
+            [f_1x1, f_3x3_reduce, f_3x3, f_5x5_reduce, f_5x5, f_pool_proj]
+    """
+    f_1x1, f_3x3_r, f_3x3, f_5x5_r, f_5x5, f_pool_proj = filters
+
+    # Branch 1: 1x1 Convolution
+    path1 = layers.Conv2D(f_1x1, (1, 1), padding='same', activation='relu')(x)
+
+    # Branch 2: 1x1 Conv (reduction) -> 3x3 Conv
+    path2 = layers.Conv2D(f_3x3_r, (1, 1), padding='same', activation='relu')(x)
+    path2 = layers.Conv2D(f_3x3, (3, 3), padding='same', activation='relu')(path2)
+
+    # Branch 3: 1x1 Conv (reduction) -> 5x5 Conv
+    path3 = layers.Conv2D(f_5x5_r, (1, 1), padding='same', activation='relu')(x)
+    path3 = layers.Conv2D(f_5x5, (5, 5), padding='same', activation='relu')(path3)
+
+    # Branch 4: MaxPool -> 1x1 Conv
+    path4 = layers.MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
+    path4 = layers.Conv2D(f_pool_proj, (1, 1), padding='same', activation='relu')(path4)
+
+    # Concatenate all branches along the channel axis (axis 3)
+    return layers.concatenate([path1, path2, path3, path4], axis=3)
+
+def auxiliary_classifier(x, num_classes, name=None):
+    """
+    Creates an auxiliary classifier branch to combat vanishing gradients.
+    """
+    # Average Pooling 5x5, stride 3
+    x = layers.AveragePooling2D((5, 5), strides=3)(x)
+    
+    # 1x1 Convolution for reduction (128 filters)
+    x = layers.Conv2D(128, (1, 1), padding='same', activation='relu')(x)
+    
+    # Flatten and Dense layers
+    x = layers.Flatten()(x)
+    x = layers.Dense(1024, activation='relu')(x)
+    
+    # Dropout (70%)
+    x = layers.Dropout(0.7)(x)
+    
+    # Output Softmax
+    output = layers.Dense(num_classes, activation='softmax', name=name)(x)
+    return output
+
+def GoogLeNet(input_shape=(224, 224, 3), num_classes=1000):
+    input_layer = Input(shape=input_shape)
+
+    # --- THE STEM ---
+    x = layers.Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(input_layer)
+    x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='maxpool1')(x)
+    
+    x = layers.Conv2D(64, (1, 1), strides=(1, 1), padding='same', activation='relu', name='conv2_1x1_reduce')(x)
+    x = layers.Conv2D(192, (3, 3), strides=(1, 1), padding='same', activation='relu', name='conv2_3x3')(x)
+    x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='maxpool2')(x)
+
+    # --- INCEPTION BLOCK 3 ---
+    # Filters format: [1x1, 3x3_r, 3x3, 5x5_r, 5x5, pool_proj]
+    x = inception_module(x, [64, 96, 128, 16, 32, 32])  # 3a
+    x = inception_module(x, [128, 128, 192, 32, 96, 64]) # 3b
+    x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='maxpool3')(x)
+
+    # --- INCEPTION BLOCK 4 ---
+    x = inception_module(x, [192, 96, 208, 16, 48, 64])  # 4a
+    
+    # --> Auxiliary Classifier 1 (Attached to 4a)
+    aux1 = auxiliary_classifier(x, num_classes, name='aux1')
+
+    x = inception_module(x, [160, 112, 224, 24, 64, 64])  # 4b
+    x = inception_module(x, [128, 128, 256, 24, 64, 64])  # 4c
+    x = inception_module(x, [112, 144, 288, 32, 64, 64])  # 4d
+    
+    # --> Auxiliary Classifier 2 (Attached to 4d)
+    aux2 = auxiliary_classifier(x, num_classes, name='aux2')
+
+    x = inception_module(x, [256, 160, 320, 32, 128, 128]) # 4e
+    x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='maxpool4')(x)
+
+    # --- INCEPTION BLOCK 5 ---
+    x = inception_module(x, [256, 160, 320, 32, 128, 128]) # 5a
+    x = inception_module(x, [384, 192, 384, 48, 128, 128]) # 5b
+
+    # --- FINAL CLASSIFIER ---
+    x = layers.GlobalAveragePooling2D(name='global_avg_pool')(x)
+    x = layers.Dropout(0.4)(x)
+    output_main = layers.Dense(num_classes, activation='softmax', name='main_output')(x)
+
+    # Create model with 1 input and 3 outputs
+    model = models.Model(inputs=input_layer, outputs=[output_main, aux1, aux2], name='GoogLeNet')
+    return model
+
+# --- Instantiate and Compile ---
+model = GoogLeNet(num_classes=1000)
+
+# Note on Compilation: 
+# We must assign weights to the losses. The paper uses 1.0 for the main output 
+# and 0.3 for the auxiliaries.
+model.compile(
+    optimizer='adam',
+    loss=['categorical_crossentropy', 'categorical_crossentropy', 'categorical_crossentropy'],
+    loss_weights=[1.0, 0.3, 0.3],
+    metrics=['accuracy']
+)
+
+model.summary()
